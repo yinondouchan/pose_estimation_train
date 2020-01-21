@@ -191,7 +191,7 @@ class HandPoseDataset(data.Dataset):
 
 class FootPoseDataset(data.Dataset):
 
-    def __init__(self, data_path, config=None, transform=None, mode='train', source='web', device='cpu', use_cache=False, cmap_kernel_type='gaussian'):
+    def __init__(self, data_path, config=None, transform=None, img_transform=None, mode='train', source='web', device='cpu', use_cache=False, cmap_kernel_type='gaussian'):
         """
         mode: can be either 'train' for training, 'val' for validation or 'raw' for raw data
         source: either 'web' for directly obtaining images from the web or 'zip' from predefined zip files
@@ -210,6 +210,8 @@ class FootPoseDataset(data.Dataset):
 
         with open(data_path) as json_file:
             self.raw_data = json.load(json_file)
+
+        self.img_transform = img_transform if img_transform is not None else list()
 
         self.transform = transform
         self.image_id_to_data, self.keys_list = self.preprocess_raw_data(self.raw_data)
@@ -301,6 +303,9 @@ class FootPoseDataset(data.Dataset):
         else:
             raise Exception('Input image channel count should be either 3 or 1')
 
+        for transform in self.img_transform:
+            img, img_keypoints = transform(img, img_keypoints)
+
         if self.transform:
             img = self.transform(img)
 
@@ -323,7 +328,6 @@ class FootPoseDataset(data.Dataset):
                 cmap[cmap < 0.02] = 0
                 paf[paf < 0.02] = 0
                 self.cache[index] = (cmap.to_sparse(), paf.to_sparse())
-
 
         return img, cmap, paf
 
@@ -360,7 +364,7 @@ class FootPoseDataset(data.Dataset):
         # img_bbox = self.image_id_to_data[image_id]['annotation']['bbox']
         return img, img_keypoints_tensor
 
-    def close():
+    def close(self):
         if self.zipfile is not None:
             self.zipfile.close()
 
