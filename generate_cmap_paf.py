@@ -194,6 +194,70 @@ def generate_paf(connections: torch.Tensor, topology: torch.Tensor, counts: torc
             paf[k_i] += scale * u_ab_i
             paf[k_j] += scale * u_ab_j
 
+    paf[paf > 1] = 1
+    return paf
+
+
+def generate_topology_independent_paf(connections: torch.Tensor, topology: torch.Tensor, counts: torch.Tensor, peaks: torch.Tensor, height, width, stdev, window=None, device='cpu'):
+    C = peaks.size(0)
+    K = topology.size(0)
+    H = height
+    W = width
+
+    paf = torch.zeros((C, H, W)).to(device)
+    var = stdev * stdev
+
+    p_c_i, p_c_j = torch.meshgrid(torch.arange(0, H) + 0.5, torch.arange(0, W) + 0.5)
+    p_c_i = p_c_i.to(device)
+    p_c_j = p_c_j.to(device)
+
+    for k in range(K):
+        c_a = int(topology[k, 2])
+        c_b = int(topology[k, 3])
+        count = int(counts[c_a])
+
+        for i_a in range(count):
+            i_b = int(connections[k, 0, i_a])
+            if i_b < 0:
+                # connection doesn't exist
+                continue
+
+            p_a = peaks[c_a, i_a]
+            p_b = peaks[c_b, i_b]
+
+            p_a_i = p_a[0] * H
+            p_a_j = p_a[1] * W
+            p_b_i = p_b[0] * H
+            p_b_j = p_b[1] * W
+            p_ab_i = p_b_i - p_a_i
+            p_ab_j = p_b_j - p_a_j
+            p_ab_mag = float(torch.sqrt(p_ab_i * p_ab_i + p_ab_j * p_ab_j)) + EPS
+            u_ab_i = p_ab_i / p_ab_mag
+            u_ab_j = p_ab_j / p_ab_mag
+
+            p_ac_i = p_c_i - p_a_i
+            p_ac_j = p_c_j - p_a_j
+
+            # dot product to find tangent bounds
+            dot = p_ac_i * u_ab_i + p_ac_j * u_ab_j
+
+            tandist = torch.zeros_like(p_c_i).to(device)
+            tandist[dot < 0.0] = dot[dot < 0.0]
+            tandist[dot > p_ab_mag] = (dot - p_ab_mag)[dot > p_ab_mag]
+
+            # cross product to find perpendicular bounds
+            cross = p_ac_i * u_ab_j - p_ac_j * u_ab_i
+
+            # scale exponentially RBF by 2D distance from nearest point on line segment
+            scale = torch.exp(-(tandist*tandist + cross*cross) / var)
+
+            if window is not None:
+                scale[cross > window] = 0
+                scale[cross < -window] = 0
+
+            paf[c_a] += scale
+
+    paf[paf > 1] = 1
     return paf
 
 

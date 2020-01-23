@@ -9,7 +9,8 @@ from torchvision import transforms
 from PIL import Image
 from io import BytesIO
 from collections import OrderedDict
-from generate_cmap_paf import generate_cmap, generate_cmap_pinpoint, generate_paf, annotations_to_connections, annotations_to_peaks
+from generate_cmap_paf import generate_cmap, generate_cmap_pinpoint, generate_paf, annotations_to_connections,\
+    annotations_to_peaks, generate_topology_independent_paf
 
 import torch
 
@@ -191,7 +192,8 @@ class HandPoseDataset(data.Dataset):
 
 class FootPoseDataset(data.Dataset):
 
-    def __init__(self, data_path, config=None, transform=None, img_transform=None, mode='train', source='web', device='cpu', use_cache=False, cmap_kernel_type='gaussian'):
+    def __init__(self, data_path, config=None, transform=None, img_transform=None, mode='train', source='web', device='cpu',
+                 use_cache=False, cmap_kernel_type='gaussian', topology_independent=False):
         """
         mode: can be either 'train' for training, 'val' for validation or 'raw' for raw data
         source: either 'web' for directly obtaining images from the web or 'zip' from predefined zip files
@@ -202,6 +204,8 @@ class FootPoseDataset(data.Dataset):
         
         self.use_cache = use_cache
         self.cache = dict()
+
+        self.topology_independent = topology_independent
 
         if config is None:
             self.config = FootOnlyConfig()
@@ -322,7 +326,13 @@ class FootPoseDataset(data.Dataset):
                 cmap = generate_cmap_pinpoint(counts, peaks, self.config.output_height, self.config.output_width, amplify_output=False)
             else:
                 cmap = generate_cmap(counts, peaks, self.config.output_height, self.config.output_width, self.stdev, self.window, device=self.device, kernel_type=self.cmap_kernel_type)
-            paf = generate_paf(connections, self.config.topology, counts, peaks, self.config.output_height, self.config.output_width, self.stdev, self.window, device=self.device)
+
+            if self.topology_independent:
+                paf = generate_topology_independent_paf(connections, self.config.topology, counts, peaks, self.config.output_height,
+                                   self.config.output_width, self.stdev, self.window, device=self.device)
+            else:
+                paf = generate_paf(connections, self.config.topology, counts, peaks, self.config.output_height,
+                                   self.config.output_width, self.stdev, self.window, device=self.device)
             
             if self.use_cache:
                 cmap[cmap < 0.02] = 0
