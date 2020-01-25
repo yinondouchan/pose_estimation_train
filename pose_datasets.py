@@ -9,8 +9,8 @@ from torchvision import transforms
 from PIL import Image
 from io import BytesIO
 from collections import OrderedDict
-from generate_cmap_paf import generate_cmap, generate_cmap_pinpoint, generate_paf, annotations_to_connections,\
-    annotations_to_peaks, generate_topology_independent_paf
+from generate_cmap_paf import generate_cmap, generate_cmap_numba, generate_cmap_pinpoint, generate_paf, annotations_to_connections,\
+    annotations_to_peaks, generate_topology_independent_paf, generate_paf_numba
 
 import torch
 
@@ -325,14 +325,14 @@ class FootPoseDataset(data.Dataset):
             if self.cmap_kernel_type == 'pinpoint':
                 cmap = generate_cmap_pinpoint(counts, peaks, self.config.output_height, self.config.output_width, amplify_output=False)
             else:
-                cmap = generate_cmap(counts, peaks, self.config.output_height, self.config.output_width, self.stdev, self.window, device=self.device, kernel_type=self.cmap_kernel_type)
+                cmap = generate_cmap_numba(counts.numpy(), peaks.numpy(), self.config.output_height, self.config.output_width, self.stdev, self.window)
 
             if self.topology_independent:
                 paf = generate_topology_independent_paf(connections, self.config.topology, counts, peaks, self.config.output_height,
                                    self.config.output_width, self.stdev, self.window, device=self.device)
             else:
-                paf = generate_paf(connections, self.config.topology, counts, peaks, self.config.output_height,
-                                   self.config.output_width, self.stdev, self.window, device=self.device)
+                paf = generate_paf_numba(connections.numpy(), self.config.topology.numpy(), counts.numpy(), peaks.numpy(), self.config.output_height,
+                                   self.config.output_width, self.stdev, self.window)
             
             if self.use_cache:
                 cmap[cmap < 0.02] = 0
