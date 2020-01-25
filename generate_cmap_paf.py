@@ -2,6 +2,7 @@ import torch
 import numpy as np
 
 from enum import Enum
+from numba import jit
 
 
 class AnnotationType(Enum):
@@ -70,8 +71,58 @@ def generate_cmap(counts: torch.Tensor, peaks: torch.Tensor, height, width, stde
             cmap[c][i_min: i_max, j_min: j_max] = torch.max(cmap[c][i_min: i_max, j_min: j_max], kernel)
 
     return cmap
-    
-    
+
+
+@jit(nopython=True)
+def generate_cmap_numba(counts, peaks, height, width, stdev, window):
+    C = peaks.shape[0]  # number of part types
+    M = peaks.shape[1]  # max number of parts per type
+    H = height
+    W = width
+    w = window / 2
+
+    cmap = np.zeros((C, H, W))
+    var = stdev * stdev
+
+    for c in range(C):
+
+        count = int(counts[c])
+        for p in range(count):
+            i_mean = peaks[c][p][0] * H
+            j_mean = peaks[c][p][1] * W
+            i_min = int(i_mean - w)
+            i_max = int(i_mean + w + 1)
+            j_min = int(j_mean - w)
+            j_max = int(j_mean + w + 1)
+
+            if i_min < 0:
+                i_min = 0
+            if i_max < 0:
+                i_max = 0
+            if i_min >= H:
+                i_min = H
+            if i_max >= H:
+                i_max = H
+
+            if j_min < 0:
+                j_min = 0
+            if j_max < 0:
+                j_max = 0
+            if j_min >= W:
+                j_min = w
+            if j_max >= W:
+                j_max = W
+
+            for i in np.arange(i_min, i_max):
+                for j in np.arange(j_min, j_max):
+                    d_i = i_mean - (i + 0.5)
+                    d_j = j_mean - (j + 0.5)
+
+                    cmap[c, int(i), int(j)] = np.exp((-d_i * d_i - d_j * d_j) / var)
+
+    return cmap
+
+
 def generate_cmap_pinpoint(counts: torch.Tensor, peaks: torch.Tensor, height, width, amplify_output=False):
     C = peaks.size(0)  # number of part types
     M = peaks.size(1)  # max number of parts per type
@@ -195,6 +246,79 @@ def generate_paf(connections: torch.Tensor, topology: torch.Tensor, counts: torc
             paf[k_j] += scale * u_ab_j
 
     paf[paf > 1] = 1
+    return paf
+
+
+@jit(nopython=True)
+def generate_paf_numba(connections, topology, counts, peaks, height, width, stdev, window=None):
+    K = topology.shape[0]
+    H = height
+    W = width
+
+    paf = np.zeros((2 * K, H, W))
+    var = stdev * stdev
+
+    # p_c_i, p_c_j = np.meshgrid(torch.arange(0, H) + 0.5, torch.arange(0, W) + 0.5)
+    #
+    for k in range(K):
+        k_i = int(topology[k, 0])
+        k_j = int(topology[k, 1])
+        c_a = int(topology[k, 2])
+        c_b = int(topology[k, 3])
+        count = int(counts[c_a])
+
+        for i_a in range(count):
+            i_b = int(connections[k, 0, i_a])
+            if i_b < 0:
+                # connection doesn't exist
+                continue
+
+            p_a = peaks[c_a, i_a]
+            p_b = peaks[c_b, i_b]
+
+            p_a_i = p_a[0] * H
+            p_a_j = p_a[1] * W
+            p_b_i = p_b[0] * H
+            p_b_j = p_b[1] * W
+            p_ab_i = p_b_i - p_a_i
+            p_ab_j = p_b_j - p_a_j
+            p_ab_mag = float(np.sqrt(p_ab_i * p_ab_i + p_ab_j * p_ab_j)) + EPS
+            u_ab_i = p_ab_i / p_ab_mag
+            u_ab_j = p_ab_j / p_ab_mag
+
+            for i in range(H):
+                for j in range(W):
+                    p_ac_i = i - p_a_i
+                    p_ac_j = j - p_a_j
+
+                    # dot product to find tangent bounds
+                    dot = p_ac_i * u_ab_i + p_ac_j * u_ab_j
+
+                    # cross product to find perpendicular bounds
+                    cross = p_ac_i * u_ab_j - p_ac_j * u_ab_i
+
+                    if window is not None and cross > window:
+                        continue
+
+                    if dot < 0.0:
+                        tandist = dot
+                    elif dot > p_ab_mag:
+                        tandist = dot - p_ab_mag
+                    else:
+                        tandist = 0.0
+
+                    if window is not None and tandist > window:
+                        continue
+
+                    scale = np.exp(-(tandist * tandist + cross * cross) / var)
+
+                    paf[k_i, i, j] += scale * u_ab_i
+                    paf[k_j, i, j] += scale * u_ab_j
+
+                    # clip to between -1 and 1
+                    paf[k_i, i, j] = min(max(paf[k_i, i, j], -1), 1)
+                    paf[k_j, i, j] = min(max(paf[k_j, i, j], -1), 1)
+
     return paf
 
 
@@ -365,47 +489,42 @@ def annotations_to_link_data(annotations: torch.Tensor, source_to_sink_map: list
     return link_data
 
 
+def recompile_nb_code():
+    import sys
+    import inspect
+
+    this_module = sys.modules[__name__]
+    module_members = inspect.getmembers(this_module)
+
+    for member_name, member in module_members:
+        if hasattr(member, 'recompile') and hasattr(member, 'inspect_llvm'):
+            member.recompile()
+
+
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
 
-    num_parts = 6
-    num_links = 6
+    from pose_datasets import BodyAndFeetConfig
 
-    # topology tensor (source_paf_ind, sink_paf_ind, source_part_ind, sink_part_ind)
-    topology = torch.Tensor([[0, 1, 0, 1],      # left big toe-> left small toe
-                             [2, 3, 1, 2],      # left small toe -> heel
-                             [4, 5, 2, 0],      # heel -> left big toe
-                             [6, 7, 3, 4],      # right big toe-> right small toe
-                             [8, 9, 4, 5],      # right small toe -> right heel
-                             [10, 11, 5, 3]])     # right heel -> right big toe
+    out_size = 56
 
-    source_to_sink_map = {0: 1, 1: 2, 2: 0, 3: 4, 4: 5, 5: 3}
+    config = BodyAndFeetConfig(out_size, out_size)
 
-    # maps a link type to its index in the connections tensor
-    link_to_connection_ind = {
-        (0, 1): 0,
-        (1, 2): 1,
-        (2, 0): 2,
-        (3, 4): 3,
-        (4, 5): 4,
-        (5, 3): 5
-    }
+    peaks = np.zeros((config.num_parts, 100, 2))
+    counts = np.ones(config.num_parts)
 
-    output_height = 56
-    output_width = 56
+    for i in range(config.num_parts):
+        peaks[i][0][0] = np.random.rand()
+        peaks[i][0][1] = np.random.rand()
 
-    stdev = 1.0
+    connections = np.zeros((config.num_links, 2, 100)) - 1
+
+    for i in range(config.num_links):
+        connections[i][0][0] = 0
+        connections[i][1][0] = 0
+
+    stdev = 1
     window = 5 * stdev
 
-    keypoints_list = [[0, 0, 0, 0.5, 0.5, 2, 0.25, 0.25, 2, 0.1, 0.1, 2, 0.8, 0.8, 2, 0, 0, 0],
-                      [0.71, 0.1, 2, 0.5, 0.2, 2, 0.45, 0.35, 2, 0.05, 0.7, 2, 0.4, 0.3, 2, 0, 0, 0]]
-    annotations_list = torch.Tensor(keypoints_list).reshape(-1, int(len(keypoints_list[0]) / 3), 3)
-
-    peaks, counts, peak_inds = annotations_to_peaks(annotations_list, num_parts)
-    cmap = generate_cmap(counts, peaks, 56, 56, stdev, window)
-    connections = annotations_to_connections(annotations_list, peak_inds, source_to_sink_map, link_to_connection_ind)
-    paf = generate_paf(connections, topology, counts, peaks, 56, 56, stdev)
-
-    plt.imshow(paf[4])
-    plt.show()
-    pass
+    cmap = generate_cmap_numba(counts, peaks, out_size, out_size, stdev, window)
+    paf = generate_paf_numba(connections, config.topology.numpy(), counts, peaks, 56, 56, stdev)
